@@ -36,6 +36,8 @@ pub struct VolumeBrowserParams {
 }
 
 pub fn run(params: VolumeBrowserParams) -> Result<VolumeBrowserOutput> {
+    let service_instance_id = params.service_instance_id.clone();
+    let identity_file = params.identity_file.clone();
     fs::create_dir_all(&params.local_dir).with_context(|| {
         format!(
             "Failed to create local transfer directory {}",
@@ -49,7 +51,7 @@ pub fn run(params: VolumeBrowserParams) -> Result<VolumeBrowserOutput> {
         original_hook(info);
     }));
 
-    let remote = VolumeFileClient::connect(params.service_instance_id, params.identity_file)?;
+    let mut remote = VolumeFileClient::connect(params.service_instance_id, params.identity_file)?;
     let mut app = VolumeBrowserApp::new(
         params.service_name,
         params.volume_name,
@@ -57,7 +59,12 @@ pub fn run(params: VolumeBrowserParams) -> Result<VolumeBrowserOutput> {
         params.local_dir,
     );
 
-    refresh_entries(&remote, &mut app);
+    refresh_entries(
+        &mut remote,
+        &mut app,
+        &service_instance_id,
+        identity_file.as_ref(),
+    );
 
     let mut terminal = setup_terminal()?;
     let _terminal_cleanup = scopeguard::guard((), |_| {
@@ -71,7 +78,13 @@ pub fn run(params: VolumeBrowserParams) -> Result<VolumeBrowserOutput> {
             Event::Key(key) if key.kind == KeyEventKind::Press => match app.handle_key(key) {
                 BrowserAction::Continue => {}
                 BrowserAction::Quit => return Ok(VolumeBrowserOutput::Closed),
-                BrowserAction::Refresh => refresh_entries(&remote, &mut app),
+                BrowserAction::Refresh => refresh_entries_with_visual(
+                    &mut remote,
+                    &mut app,
+                    &mut terminal,
+                    &service_instance_id,
+                    identity_file.as_ref(),
+                )?,
                 BrowserAction::OpenSelected => open_selected(&remote, &mut app),
                 BrowserAction::Parent => open_parent(&remote, &mut app),
                 BrowserAction::DownloadSelected => {
@@ -80,6 +93,8 @@ pub fn run(params: VolumeBrowserParams) -> Result<VolumeBrowserOutput> {
                     }
                 }
                 BrowserAction::EditSelected => edit_selected(&remote, &mut app, &mut terminal),
+                BrowserAction::StartRename => app.set_status("Enter a new name"),
+                BrowserAction::SubmitRename => rename_selected(&remote, &mut app),
                 BrowserAction::StartUpload => {
                     refresh_local_entries(&mut app);
                     app.set_status("Select a local file or directory to upload");
@@ -133,20 +148,79 @@ fn edit_selected(
     match result {
         Ok(message) => {
             app.set_status(message);
-            refresh_entries(remote, app);
+            refresh_entries_without_reconnect(remote, app);
         }
         Err(error) => app.set_error(error.to_string()),
     }
 }
 
-fn refresh_entries(remote: &VolumeFileClient, app: &mut VolumeBrowserApp) {
+fn refresh_entries(
+    remote: &mut VolumeFileClient,
+    app: &mut VolumeBrowserApp,
+    service_instance_id: &str,
+    identity_file: Option<&PathBuf>,
+) {
+    match try_refresh_entries(remote, app) {
+        Ok(()) => {}
+        Err(error) if is_session_closed_error(&error) => {
+            match VolumeFileClient::connect(service_instance_id.to_string(), identity_file.cloned())
+            {
+                Ok(new_remote) => {
+                    *remote = new_remote;
+                    if let Err(error) = try_refresh_entries(remote, app) {
+                        app.set_error(format!("Failed to list directory: {error:#}"));
+                    }
+                }
+                Err(reconnect_error) => app.set_error(format!(
+                    "SFTP session closed and reconnect failed: {reconnect_error:#}"
+                )),
+            }
+        }
+        Err(error) => app.set_error(format!("Failed to list directory: {error:#}")),
+    }
+}
+
+fn refresh_entries_with_visual(
+    remote: &mut VolumeFileClient,
+    app: &mut VolumeBrowserApp,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    service_instance_id: &str,
+    identity_file: Option<&PathBuf>,
+) -> Result<()> {
+    app.is_refreshing = true;
+    app.set_status("Refreshing...");
+
+    let draw_result = terminal.draw(|frame| ui::render(app, frame));
+    if let Err(error) = draw_result {
+        app.is_refreshing = false;
+        return Err(error.into());
+    }
+
+    refresh_entries(remote, app, service_instance_id, identity_file);
+    app.is_refreshing = false;
+    Ok(())
+}
+
+fn refresh_entries_without_reconnect(remote: &VolumeFileClient, app: &mut VolumeBrowserApp) {
+    if let Err(error) = try_refresh_entries(remote, app) {
+        app.set_error(format!("Failed to list directory: {error:#}"));
+    }
+}
+
+fn try_refresh_entries(remote: &VolumeFileClient, app: &mut VolumeBrowserApp) -> Result<()> {
     match remote.list_dir(&app.current_path) {
         Ok(entries) => {
             app.set_entries(entries);
-            app.set_status("Ready");
+            app.status = None;
+            app.error = None;
+            Ok(())
         }
-        Err(error) => app.set_error(format!("Failed to list directory: {error}")),
+        Err(error) => Err(error),
     }
+}
+
+fn is_session_closed_error(error: &anyhow::Error) -> bool {
+    format!("{error:#}").contains("session closed")
 }
 
 fn open_selected(remote: &VolumeFileClient, app: &mut VolumeBrowserApp) {
@@ -161,7 +235,7 @@ fn open_selected(remote: &VolumeFileClient, app: &mut VolumeBrowserApp) {
 
     app.current_path = entry.path;
     app.selected = 0;
-    refresh_entries(remote, app);
+    refresh_entries_without_reconnect(remote, app);
 }
 
 fn open_parent(remote: &VolumeFileClient, app: &mut VolumeBrowserApp) {
@@ -181,7 +255,7 @@ fn open_parent(remote: &VolumeFileClient, app: &mut VolumeBrowserApp) {
 
     app.current_path = parent;
     app.selected = 0;
-    refresh_entries(remote, app);
+    refresh_entries_without_reconnect(remote, app);
 }
 
 fn queue_download(app: &mut VolumeBrowserApp) -> bool {
@@ -201,6 +275,38 @@ fn queue_download(app: &mut VolumeBrowserApp) -> bool {
         false
     } else {
         true
+    }
+}
+
+fn rename_selected(remote: &VolumeFileClient, app: &mut VolumeBrowserApp) {
+    let Some(entry) = app.selected_entry().cloned() else {
+        app.set_status("Nothing selected");
+        return;
+    };
+
+    let new_name = app.rename_input.trim();
+    if new_name.is_empty() || new_name.contains('/') {
+        app.set_error("Rename must be a non-empty file name");
+        return;
+    }
+
+    let Some(parent) = entry.path.parent() else {
+        app.set_error("Selected path has no parent");
+        return;
+    };
+    let target = parent.join(new_name);
+
+    if target == entry.path {
+        app.set_status("Name unchanged");
+        return;
+    }
+
+    match remote.rename(&entry.path, &target) {
+        Ok(()) => {
+            app.set_status(format!("Renamed {} to {}", entry.name, new_name));
+            refresh_entries_without_reconnect(remote, app);
+        }
+        Err(error) => app.set_error(error.to_string()),
     }
 }
 
@@ -321,7 +427,7 @@ fn run_pending_transfer(
     match result {
         Ok(message) => {
             app.set_status(message);
-            refresh_entries(remote, app);
+            refresh_entries_without_reconnect(remote, app);
         }
         Err(error) => app.set_error(error.to_string()),
     }

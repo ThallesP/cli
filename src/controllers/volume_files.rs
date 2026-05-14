@@ -25,6 +25,7 @@ use crate::controllers::ssh_keys::find_local_ssh_keys;
 
 const SSH_HOST: &str = "ssh.railway.com";
 const SSH_PORT: u16 = 22;
+const SFTP_REQUEST_TIMEOUT_SECS: u64 = 60;
 const DIRECTORY_FILE_CONCURRENCY: usize = 16;
 const DIRECTORY_SUBDIR_CONCURRENCY: usize = 4;
 
@@ -113,6 +114,21 @@ impl VolumeFileClient {
 
     pub fn remove_path(&self, path: &Path) -> Result<()> {
         block_on(self.remove_path_async(path))
+    }
+
+    pub fn rename(&self, from: &Path, to: &Path) -> Result<()> {
+        block_on(async {
+            self.sftp
+                .rename(remote_path(from), remote_path(to))
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to rename remote path {} to {}",
+                        from.display(),
+                        to.display()
+                    )
+                })
+        })
     }
 
     pub fn download(&self, remote: &Path, local: &Path, kind: VolumeFileKind) -> Result<()> {
@@ -465,6 +481,7 @@ async fn connect_with_key(
     let sftp = SftpSession::new(channel.into_stream())
         .await
         .context("Failed to initialize SFTP session")?;
+    sftp.set_timeout(SFTP_REQUEST_TIMEOUT_SECS);
 
     Ok((ssh, sftp))
 }

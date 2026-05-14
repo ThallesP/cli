@@ -12,6 +12,8 @@ pub enum BrowserAction {
     Parent,
     DownloadSelected,
     EditSelected,
+    StartRename,
+    SubmitRename,
     StartUpload,
     OpenLocalSelected,
     LocalParent,
@@ -38,7 +40,7 @@ pub enum BrowserMode {
     Browse,
     UploadPicker,
     ConfirmOverwrite,
-    Help,
+    RenamePrompt,
 }
 
 #[derive(Debug, Clone)]
@@ -62,8 +64,10 @@ pub struct VolumeBrowserApp {
     pub local_selected: usize,
     pub status: Option<String>,
     pub error: Option<String>,
+    pub is_refreshing: bool,
     pub mode: BrowserMode,
     pub pending_transfer: Option<PendingTransfer>,
+    pub rename_input: String,
 }
 
 impl VolumeBrowserApp {
@@ -86,8 +90,10 @@ impl VolumeBrowserApp {
             local_selected: 0,
             status: None,
             error: None,
+            is_refreshing: false,
             mode: BrowserMode::Browse,
             pending_transfer: None,
+            rename_input: String::new(),
         }
     }
 
@@ -151,17 +157,13 @@ impl VolumeBrowserApp {
             BrowserMode::Browse => self.handle_browse_key(key),
             BrowserMode::UploadPicker => self.handle_upload_key(key),
             BrowserMode::ConfirmOverwrite => self.handle_confirm_key(key),
-            BrowserMode::Help => self.handle_help_key(key),
+            BrowserMode::RenamePrompt => self.handle_rename_key(key),
         }
     }
 
     fn handle_browse_key(&mut self, key: KeyEvent) -> BrowserAction {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => BrowserAction::Quit,
-            KeyCode::Char('?') => {
-                self.mode = BrowserMode::Help;
-                BrowserAction::Continue
-            }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.selected = self.selected.saturating_sub(1);
                 BrowserAction::Continue
@@ -177,6 +179,15 @@ impl VolumeBrowserApp {
             KeyCode::Char('r') => BrowserAction::Refresh,
             KeyCode::Char('d') => BrowserAction::DownloadSelected,
             KeyCode::Char('e') => BrowserAction::EditSelected,
+            KeyCode::Char('m') => {
+                if let Some(entry) = self.selected_entry() {
+                    self.rename_input = entry.name.clone();
+                    self.mode = BrowserMode::RenamePrompt;
+                    BrowserAction::StartRename
+                } else {
+                    BrowserAction::Continue
+                }
+            }
             KeyCode::Char('u') => {
                 self.mode = BrowserMode::UploadPicker;
                 BrowserAction::StartUpload
@@ -227,10 +238,22 @@ impl VolumeBrowserApp {
         }
     }
 
-    fn handle_help_key(&mut self, key: KeyEvent) -> BrowserAction {
+    fn handle_rename_key(&mut self, key: KeyEvent) -> BrowserAction {
         match key.code {
-            KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => {
+            KeyCode::Enter => {
                 self.mode = BrowserMode::Browse;
+                BrowserAction::SubmitRename
+            }
+            KeyCode::Esc => {
+                self.mode = BrowserMode::Browse;
+                BrowserAction::CancelPrompt
+            }
+            KeyCode::Backspace => {
+                self.rename_input.pop();
+                BrowserAction::Continue
+            }
+            KeyCode::Char(ch) => {
+                self.rename_input.push(ch);
                 BrowserAction::Continue
             }
             _ => BrowserAction::Continue,

@@ -27,10 +27,15 @@ pub fn render(app: &VolumeBrowserApp, frame: &mut Frame) {
         return;
     }
 
+    let footer_height = if app.error.is_some() || app.status.is_some() {
+        3
+    } else {
+        2
+    };
     let chunks = Layout::vertical([
         Constraint::Length(4),
         Constraint::Min(6),
-        Constraint::Length(3),
+        Constraint::Length(footer_height),
     ])
     .split(area);
 
@@ -49,7 +54,7 @@ pub fn render(app: &VolumeBrowserApp, frame: &mut Frame) {
     match app.mode {
         BrowserMode::UploadPicker => {}
         BrowserMode::ConfirmOverwrite => render_confirm_popup(app, frame, area),
-        BrowserMode::Help => render_help_popup(frame, area),
+        BrowserMode::RenamePrompt => render_rename_popup(app, frame, area),
         BrowserMode::Browse => {}
     }
 }
@@ -101,24 +106,54 @@ fn render_header(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
 }
 
 fn render_entries(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
+    let list_title = if app.is_refreshing {
+        " Files - refreshing "
+    } else {
+        " Files "
+    };
+    let border_style = if app.is_refreshing {
+        Style::default().fg(Color::Indexed(238))
+    } else {
+        Style::default().fg(BORDER_COLOR)
+    };
+    let label_style = if app.is_refreshing {
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::DIM)
+    } else {
+        Style::default().fg(LABEL_COLOR)
+    };
+    let selected_style = if app.is_refreshing {
+        Style::default()
+            .fg(Color::Gray)
+            .bg(Color::Indexed(236))
+            .add_modifier(Modifier::DIM)
+    } else {
+        SELECTED_STYLE
+    };
+
     let items = if app.entries.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
             "  Directory is empty.",
-            Style::default().fg(LABEL_COLOR),
+            label_style,
         )))]
     } else {
         app.entries
             .iter()
             .map(|entry| {
                 let marker = entry.kind.marker();
-                let style = if entry.kind.is_dir() {
+                let style = if app.is_refreshing {
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::DIM)
+                } else if entry.kind.is_dir() {
                     Style::default().fg(Color::Blue)
                 } else {
                     Style::default().fg(Color::White)
                 };
                 let suffix = if entry.kind.is_dir() { "/" } else { "" };
                 ListItem::new(Line::from(vec![
-                    Span::styled(marker, Style::default().fg(LABEL_COLOR)),
+                    Span::styled(marker, label_style),
                     Span::raw(" "),
                     Span::styled(format!("{}{suffix}", entry.name), style),
                 ]))
@@ -129,11 +164,11 @@ fn render_entries(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
     let list = List::new(items)
         .block(
             Block::default()
-                .title(" Files ")
+                .title(list_title)
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(BORDER_COLOR)),
+                .border_style(border_style),
         )
-        .highlight_style(SELECTED_STYLE);
+        .highlight_style(selected_style);
 
     let mut state = ListState::default();
     if !app.entries.is_empty() {
@@ -219,9 +254,9 @@ fn help_line(mode: BrowserMode) -> Line<'static> {
             ("Left", "parent"),
             ("d", "download"),
             ("e", "edit"),
+            ("m", "rename"),
             ("u", "upload"),
             ("r", "refresh"),
-            ("?", "help"),
             ("q", "quit"),
         ],
         BrowserMode::UploadPicker => &[
@@ -233,7 +268,7 @@ fn help_line(mode: BrowserMode) -> Line<'static> {
             ("Esc", "cancel"),
         ],
         BrowserMode::ConfirmOverwrite => &[("Enter/y", "overwrite"), ("n/Esc", "cancel")],
-        BrowserMode::Help => &[("Esc", "close help")],
+        BrowserMode::RenamePrompt => &[("Enter", "rename"), ("Esc", "cancel")],
     };
 
     let mut spans = vec![Span::raw(" ")];
@@ -270,24 +305,17 @@ fn render_confirm_popup(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
     frame.render_widget(content, popup);
 }
 
-fn render_help_popup(frame: &mut Frame, area: Rect) {
-    let popup = centered_rect(76, 11, area);
+fn render_rename_popup(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
+    let popup = centered_rect(72, 6, area);
     frame.render_widget(Clear, popup);
-    let help = Paragraph::new(vec![
-        Line::from("Browse Railway volume files over SSH/SCP."),
+    let content = Paragraph::new(vec![
+        Line::from("New name"),
+        Line::from(app.rename_input.clone()),
         Line::from(""),
-        Line::from("Up/Down or k/j    Move selection"),
-        Line::from("Enter or Right    Open directory"),
-        Line::from("Left or Backspace Parent directory"),
-        Line::from("d                 Download selected file or directory"),
-        Line::from("e                 Edit selected file and sync it back"),
-        Line::from("u                 Open local upload picker"),
-        Line::from("Enter             Upload selected local entry from picker"),
-        Line::from("r                 Refresh"),
-        Line::from("q or Esc          Quit"),
     ])
-    .block(Block::default().borders(Borders::ALL).title(" Help "));
-    frame.render_widget(help, popup);
+    .wrap(Wrap { trim: true })
+    .block(Block::default().borders(Borders::ALL).title(" Rename "));
+    frame.render_widget(content, popup);
 }
 
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
